@@ -115,42 +115,244 @@ REVEAL_TEMPLATE = """
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Hent hemmelighed</title>
+  <title>Sikker adgang til delt nøgle</title>
   <style>
-    body { font-family: Arial, sans-serif; background:#0f172a; color:#e2e8f0; margin:0; padding:40px; }
-    .card { max-width: 920px; margin: 0 auto; background:#111827; border:1px solid #334155; border-radius:12px; padding:24px; }
-    h1 { margin-top:0; }
-    label { display:block; margin:16px 0 6px; font-weight:600; }
-    input, button { width:100%; box-sizing:border-box; border-radius:8px; border:1px solid #475569; background:#0b1220; color:#e2e8f0; padding:12px; }
-    button { background:#2563eb; border:none; cursor:pointer; font-weight:700; margin-top:20px; }
-    button:hover { background:#1d4ed8; }
-    .msg { margin:16px 0; padding:12px 14px; border-radius:8px; }
-    .ok { background:#052e16; border:1px solid #166534; }
-    .err { background:#450a0a; border:1px solid #991b1b; }
-    .small { color:#94a3b8; font-size:14px; }
-    pre { white-space:pre-wrap; word-break:break-word; background:#020617; padding:16px; border-radius:8px; }
+    :root {
+      --bg: #0b1020;
+      --bg2: #11172a;
+      --card: rgba(17, 24, 39, 0.88);
+      --border: rgba(148, 163, 184, 0.16);
+      --text: #e5eefc;
+      --muted: #9fb0cc;
+      --primary: #4f8cff;
+      --primary-hover: #3d79eb;
+      --success-bg: rgba(22, 101, 52, 0.18);
+      --success-border: rgba(34, 197, 94, 0.35);
+      --error-bg: rgba(127, 29, 29, 0.22);
+      --error-border: rgba(248, 113, 113, 0.32);
+      --input: rgba(15, 23, 42, 0.75);
+      --shadow: 0 20px 60px rgba(0,0,0,0.35);
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      font-family: Inter, Arial, sans-serif;
+      color: var(--text);
+      background:
+        radial-gradient(circle at top left, rgba(79,140,255,0.20), transparent 30%),
+        radial-gradient(circle at top right, rgba(59,130,246,0.16), transparent 25%),
+        linear-gradient(180deg, var(--bg) 0%, var(--bg2) 100%);
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 32px 20px;
+    }
+
+    .wrap {
+      width: 100%;
+      max-width: 760px;
+    }
+
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      box-shadow: var(--shadow);
+      overflow: hidden;
+      backdrop-filter: blur(10px);
+    }
+
+    .hero {
+      padding: 28px 28px 18px 28px;
+      border-bottom: 1px solid rgba(148, 163, 184, 0.10);
+      background: linear-gradient(180deg, rgba(79,140,255,0.10) 0%, rgba(79,140,255,0.03) 100%);
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 12px;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      color: #c7d7ff;
+      background: rgba(79,140,255,0.12);
+      border: 1px solid rgba(79,140,255,0.22);
+      padding: 8px 12px;
+      border-radius: 999px;
+      margin-bottom: 16px;
+    }
+
+    h1 {
+      margin: 0 0 12px 0;
+      font-size: 30px;
+      line-height: 1.15;
+      font-weight: 700;
+    }
+
+    .lead {
+      margin: 0;
+      color: var(--muted);
+      font-size: 16px;
+      line-height: 1.6;
+      max-width: 620px;
+    }
+
+    .body {
+      padding: 28px;
+    }
+
+    .panel {
+      background: rgba(2, 6, 23, 0.38);
+      border: 1px solid rgba(148, 163, 184, 0.10);
+      border-radius: 16px;
+      padding: 22px;
+      margin-bottom: 18px;
+    }
+
+    .panel h2 {
+      margin: 0 0 8px 0;
+      font-size: 18px;
+    }
+
+    .panel p {
+      margin: 0;
+      color: var(--muted);
+      line-height: 1.6;
+      font-size: 15px;
+    }
+
+    input {
+      width: 100%;
+      padding: 14px 14px;
+      border-radius: 12px;
+      border: 1px solid rgba(148, 163, 184, 0.18);
+      background: var(--input);
+      color: var(--text);
+      outline: none;
+      font-size: 15px;
+    }
+
+    input:focus {
+      border-color: rgba(79,140,255,0.55);
+      box-shadow: 0 0 0 4px rgba(79,140,255,0.12);
+    }
+
+    button {
+      width: 100%;
+      margin-top: 18px;
+      border: 0;
+      border-radius: 12px;
+      background: var(--primary);
+      color: white;
+      font-weight: 700;
+      font-size: 15px;
+      padding: 14px 16px;
+      cursor: pointer;
+      transition: background 0.15s ease, transform 0.05s ease;
+    }
+
+    button:hover { background: var(--primary-hover); }
+    button:active { transform: translateY(1px); }
+
+    .msg {
+      margin-bottom: 18px;
+      padding: 16px 18px;
+      border-radius: 14px;
+      line-height: 1.55;
+      font-size: 15px;
+    }
+
+    .ok {
+      background: var(--success-bg);
+      border: 1px solid var(--success-border);
+    }
+
+    .err {
+      background: var(--error-bg);
+      border: 1px solid var(--error-border);
+    }
+
+    .msg strong {
+      display: block;
+      margin-bottom: 4px;
+    }
+
+    pre {
+      white-space: pre-wrap;
+      word-break: break-word;
+      background: rgba(2, 6, 23, 0.72);
+      border: 1px solid rgba(148, 163, 184, 0.10);
+      padding: 16px;
+      border-radius: 12px;
+      color: #f8fbff;
+      font-size: 14px;
+      overflow: auto;
+    }
+
+    .note {
+      margin-top: 12px;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.6;
+    }
+
+    .footer {
+      padding: 0 28px 24px 28px;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.6;
+    }
+
+    @media (max-width: 640px) {
+      h1 { font-size: 24px; }
+      .hero, .body, .footer { padding-left: 20px; padding-right: 20px; }
+    }
   </style>
 </head>
 <body>
-  <div class="card">
-    <h1>Hent hemmelighed</h1>
-    <p class="small">
-      Hemmeligheden hentes først når du klikker på knappen nedenfor.
-      Linket kan kun bruges én gang.
-    </p>
+  <div class="wrap">
+    <div class="card">
+      <div class="hero">
+        <div class="badge">Sikker engangsadgang</div>
+        <h1>Sikker adgang til delt nøgle</h1>
+        <p class="lead">
+          Denne nøgle er delt sikkert og kan kun vises én gang.
+        </p>
+      </div>
 
-    <div id="errorBox" class="msg err" hidden></div>
+      <div class="body">
+        <div id="errorBox" class="msg err" hidden></div>
 
-    <form id="revealForm" autocomplete="off">
-      <label>Passphrase (kun hvis afsender har givet dig en separat kode)</label>
-      <input type="text" id="passphrase" placeholder="Valgfri passphrase">
-      <button type="submit">Vis hemmelighed én gang</button>
-    </form>
+        <div class="panel">
+          <h2>Før du fortsætter</h2>
+          <p>
+            UNICEF har sendt en kode, som skal indtastes nedenfor for at få adgang til nøglen.
+          </p>
+        </div>
 
-    <div id="resultBox" class="msg ok" hidden>
-      <div><strong>Hemmelighed</strong></div>
-      <pre id="secretValue"></pre>
-      <div class="small">Denne værdi er nu forbrugt og kan ikke hentes igen med samme link.</div>
+        <form id="revealForm" autocomplete="off">
+          <input type="text" id="passphrase" placeholder="Indtast koden fra UNICEF" required>
+
+          <button type="submit">Vis nøgle sikkert</button>
+        </form>
+
+        <div id="resultBox" class="msg ok" hidden>
+          <strong>Nøglen er nu vist</strong>
+          <div>Indholdet nedenfor er nu forbrugt og kan ikke hentes igen via samme link.</div>
+          <pre id="secretValue"></pre>
+          <div class="note">
+            Gem nøglen sikkert med det samme, hvis du skal bruge den senere.
+          </div>
+        </div>
+      </div>
+
+      <div class="footer">
+        Af sikkerhedsmæssige årsager bliver nøglen ikke vist automatisk og kan kun åbnes én gang.
+      </div>
     </div>
   </div>
 
@@ -160,16 +362,19 @@ REVEAL_TEMPLATE = """
     const resultBox = document.getElementById("resultBox");
     const secretValue = document.getElementById("secretValue");
 
-    function showError(message) {
+    function showError(title, message) {
       errorBox.hidden = false;
-      errorBox.innerText = message;
+      errorBox.innerHTML = "<strong>" + title + "</strong><div>" + message + "</div>";
     }
 
     const token = window.location.hash ? window.location.hash.substring(1) : "";
 
     if (!token) {
       revealForm.hidden = true;
-      showError("Mangler token i linket. Kontroller at hele URL'en er kopieret.");
+      showError(
+        "Linket er ikke komplet",
+        "Det ser ud til, at linket mangler den sikre adgangsdel. Kontrollér, at du har åbnet hele linket, præcis som det blev sendt til dig."
+      );
     }
 
     revealForm.addEventListener("submit", async (e) => {
@@ -192,15 +397,22 @@ REVEAL_TEMPLATE = """
         const data = await response.json();
 
         if (!response.ok) {
-          showError(data.error || "Kunne ikke hente hemmeligheden");
+          showError(
+            "Adgang kunne ikke gennemføres",
+            data.error || "Nøglen kunne ikke hentes. Kontrollér linket og prøv igen."
+          );
           return;
         }
 
         revealForm.hidden = true;
+        errorBox.hidden = true;
         resultBox.hidden = false;
         secretValue.textContent = data.secret;
       } catch (err) {
-        showError("Netværksfejl ved hentning af hemmeligheden");
+        showError(
+          "Midlertidig forbindelsesfejl",
+          "Der opstod en fejl under hentning af nøglen. Prøv igen om et øjeblik."
+        );
       }
     });
   </script>
