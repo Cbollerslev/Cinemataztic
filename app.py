@@ -281,16 +281,53 @@ REVEAL_TEMPLATE = """
       margin-bottom: 4px;
     }
 
-    pre {
-      white-space: pre-wrap;
-      word-break: break-word;
+    .secret-box {
+      position: relative;
+      margin-top: 14px;
       background: rgba(2, 6, 23, 0.72);
       border: 1px solid rgba(148, 163, 184, 0.10);
-      padding: 16px;
       border-radius: 12px;
+      overflow: hidden;
+    }
+
+    .copy-chip {
+      position: absolute;
+      top: 12px;
+      right: 12px;
+      width: auto;
+      margin: 0;
+      padding: 8px 12px;
+      border-radius: 10px;
+      background: rgba(79,140,255,0.18);
+      border: 1px solid rgba(79,140,255,0.30);
+      color: #eaf2ff;
+      font-size: 13px;
+      font-weight: 700;
+      line-height: 1;
+      z-index: 2;
+    }
+
+    .copy-chip:hover {
+      background: rgba(79,140,255,0.28);
+    }
+
+    pre {
+      margin: 0;
+      white-space: pre-wrap;
+      word-break: break-word;
+      padding: 52px 16px 16px 16px;
       color: #f8fbff;
       font-size: 14px;
       overflow: auto;
+      background: transparent;
+      border: 0;
+    }
+
+    .copy-status {
+      margin-top: 10px;
+      color: #bbf7d0;
+      font-size: 13px;
+      display: none;
     }
 
     .note {
@@ -310,6 +347,13 @@ REVEAL_TEMPLATE = """
     @media (max-width: 640px) {
       h1 { font-size: 24px; }
       .hero, .body, .footer { padding-left: 20px; padding-right: 20px; }
+      .copy-chip {
+        top: 10px;
+        right: 10px;
+      }
+      pre {
+        padding-top: 50px;
+      }
     }
   </style>
 </head>
@@ -336,14 +380,20 @@ REVEAL_TEMPLATE = """
 
         <form id="revealForm" autocomplete="off">
           <input type="text" id="passphrase" placeholder="Indtast koden fra UNICEF" required>
-
           <button type="submit">Vis nøgle sikkert</button>
         </form>
 
         <div id="resultBox" class="msg ok" hidden>
           <strong>Nøglen er nu vist</strong>
           <div>Indholdet nedenfor er nu forbrugt og kan ikke hentes igen via samme link.</div>
-          <pre id="secretValue"></pre>
+
+          <div class="secret-box">
+            <button type="button" class="copy-chip" onclick="copySecret()">Kopiér</button>
+            <pre id="secretValue"></pre>
+          </div>
+
+          <div id="copyStatus" class="copy-status">Nøglen er kopieret til udklipsholderen.</div>
+
           <div class="note">
             Gem nøglen sikkert med det samme, hvis du skal bruge den senere.
           </div>
@@ -361,10 +411,25 @@ REVEAL_TEMPLATE = """
     const revealForm = document.getElementById("revealForm");
     const resultBox = document.getElementById("resultBox");
     const secretValue = document.getElementById("secretValue");
+    const copyStatus = document.getElementById("copyStatus");
 
     function showError(title, message) {
       errorBox.hidden = false;
       errorBox.innerHTML = "<strong>" + title + "</strong><div>" + message + "</div>";
+    }
+
+    async function copySecret() {
+      const value = secretValue.textContent || "";
+      if (!value) return;
+
+      try {
+        await navigator.clipboard.writeText(value);
+        copyStatus.style.display = "block";
+        copyStatus.textContent = "Nøglen er kopieret til udklipsholderen.";
+      } catch (err) {
+        copyStatus.style.display = "block";
+        copyStatus.textContent = "Kunne ikke kopiere automatisk. Markér og kopiér nøglen manuelt.";
+      }
     }
 
     const token = window.location.hash ? window.location.hash.substring(1) : "";
@@ -406,6 +471,7 @@ REVEAL_TEMPLATE = """
 
         revealForm.hidden = true;
         errorBox.hidden = true;
+        copyStatus.style.display = "none";
         resultBox.hidden = false;
         secretValue.textContent = data.secret;
       } catch (err) {
