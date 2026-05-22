@@ -34,6 +34,9 @@ SMS_DEFAULT_SENDER = os.getenv("SMS_DEFAULT_SENDER", "UNICEF").strip()
 SMS_TIMEOUT_SECONDS = int(os.getenv("SMS_TIMEOUT_SECONDS", "15"))
 MAX_SMS_TEXT_LENGTH = int(os.getenv("MAX_SMS_TEXT_LENGTH", "1000"))
 
+# --- Mail-skabelon (åbnes i Outlook via mailto:) ---
+DEFAULT_EMAIL_SUBJECT = os.getenv("DEFAULT_EMAIL_SUBJECT", "Sikkert engangslink fra UNICEF").strip()
+
 if not DATABASE_URL:
     raise RuntimeError("DATABASE_URL is required")
 if not MASTER_KEY:
@@ -65,9 +68,12 @@ CREATE_TEMPLATE = """
     label { display:block; margin:16px 0 6px; font-weight:600; }
     input, textarea, button { width:100%; box-sizing:border-box; border-radius:8px; border:1px solid #475569; background:#0b1220; color:#e2e8f0; padding:12px; }
     textarea { min-height:140px; resize:vertical; font-family: Arial, sans-serif; }
-    textarea.message { min-height:160px; }
     button { background:#2563eb; border:none; cursor:pointer; font-weight:700; margin-top:20px; }
     button:hover { background:#1d4ed8; }
+    button.secondary { background:#0ea5e9; }
+    button.secondary:hover { background:#0284c7; }
+    .btn-row { display:flex; gap:10px; margin-top:14px; }
+    .btn-row button { margin-top:0; }
     .msg { margin:16px 0; padding:12px 14px; border-radius:8px; }
     .ok { background:#052e16; border:1px solid #166534; }
     .err { background:#450a0a; border:1px solid #991b1b; }
@@ -76,7 +82,7 @@ CREATE_TEMPLATE = """
     .small { color:#94a3b8; font-size:14px; }
     .hint { color:#94a3b8; font-size:13px; margin-top:4px; }
     .row { display:grid; grid-template-columns: 1fr 1fr; gap:16px; }
-    @media (max-width: 700px) { .row { grid-template-columns: 1fr; } }
+    @media (max-width: 700px) { .row { grid-template-columns: 1fr; } .btn-row { flex-direction: column; } }
   </style>
 </head>
 <body>
@@ -99,8 +105,25 @@ CREATE_TEMPLATE = """
           <div>SMS: {{ result.sms_status }}</div>
         {% endif %}
         <pre id="linkBox">{{ result.url }}</pre>
-        <button type="button" onclick="copyLink()">Kopiér link</button>
+        <div class="btn-row">
+          <button type="button" onclick="copyLink()">Kopiér link</button>
+          {% if result.email_to %}
+            <button type="button" class="secondary" onclick="openMail()">Åbn mail i Outlook</button>
+          {% endif %}
+        </div>
       </div>
+
+      {% if result.email_to %}
+        <script>
+          window.__mail = {
+            to: {{ result.email_to|tojson }},
+            subject: {{ result.email_subject|tojson }},
+            recipientName: {{ result.email_recipient_name|tojson }},
+            link: {{ result.url|tojson }},
+            smsSent: {{ result.sms_was_sent|tojson }}
+          };
+        </script>
+      {% endif %}
     {% endif %}
 
     <form method="post" action="/create" autocomplete="off">
@@ -144,6 +167,23 @@ CREATE_TEMPLATE = """
       <label>Afsendernavn (senderAlias)</label>
       <input type="text" name="sender_alias" maxlength="11" value="UNICEF" placeholder="Max 11 tegn">
 
+      <h2>Mail (valgfri)</h2>
+      <p class="small">
+        Udfyldes modtagermailen, vises en knap efter oprettelse, der åbner en forudfyldt mail i Outlook
+        (eller din standard-mailklient). Du sender selv mailen fra din egen mailkonto.
+      </p>
+
+      <div class="row">
+        <div>
+          <label>Modtagermail</label>
+          <input type="email" name="recipient_email" placeholder="fx anne@unicef.dk">
+        </div>
+        <div>
+          <label>Emnefelt (valgfri)</label>
+          <input type="text" name="email_subject" placeholder="{{ default_subject }}">
+        </div>
+      </div>
+
       <button type="submit">Opret engangslink</button>
     </form>
   </div>
@@ -154,6 +194,41 @@ CREATE_TEMPLATE = """
       if (!value) return;
       await navigator.clipboard.writeText(value);
       alert("Link kopieret");
+    }
+
+    function openMail() {
+      const m = window.__mail;
+      if (!m) return;
+
+      const greeting = m.recipientName ? "Hej " + m.recipientName + "," : "Hej,";
+      const smsLine = m.smsSent
+        ? "Koden til at åbne linket har du modtaget separat via SMS."
+        : "";
+
+      const bodyLines = [
+        greeting,
+        "",
+        "Du har modtaget et sikkert engangslink. Linket kan kun åbnes én gang og udløber automatisk.",
+        ""
+      ];
+      if (smsLine) {
+        bodyLines.push(smsLine, "");
+      }
+      bodyLines.push(
+        "Link:",
+        m.link,
+        "",
+        "Venlig hilsen",
+        "UNICEF"
+      );
+      const body = bodyLines.join("\\n");
+
+      const href =
+        "mailto:" + encodeURIComponent(m.to) +
+        "?subject=" + encodeURIComponent(m.subject) +
+        "&body=" + encodeURIComponent(body);
+
+      window.location.href = href;
     }
   </script>
 </body>
@@ -169,20 +244,12 @@ REVEAL_TEMPLATE = """
   <title>Sikker adgang til delt nøgle</title>
   <style>
     :root {
-      --bg: #0b1020;
-      --bg2: #11172a;
-      --card: rgba(17, 24, 39, 0.88);
-      --border: rgba(148, 163, 184, 0.16);
-      --text: #e5eefc;
-      --muted: #9fb0cc;
-      --primary: #4f8cff;
-      --primary-hover: #3d79eb;
-      --success-bg: rgba(22, 101, 52, 0.18);
-      --success-border: rgba(34, 197, 94, 0.35);
-      --error-bg: rgba(127, 29, 29, 0.22);
-      --error-border: rgba(248, 113, 113, 0.32);
-      --input: rgba(15, 23, 42, 0.75);
-      --shadow: 0 20px 60px rgba(0,0,0,0.35);
+      --bg: #0b1020; --bg2: #11172a; --card: rgba(17, 24, 39, 0.88);
+      --border: rgba(148, 163, 184, 0.16); --text: #e5eefc; --muted: #9fb0cc;
+      --primary: #4f8cff; --primary-hover: #3d79eb;
+      --success-bg: rgba(22, 101, 52, 0.18); --success-border: rgba(34, 197, 94, 0.35);
+      --error-bg: rgba(127, 29, 29, 0.22); --error-border: rgba(248, 113, 113, 0.32);
+      --input: rgba(15, 23, 42, 0.75); --shadow: 0 20px 60px rgba(0,0,0,0.35);
     }
     * { box-sizing: border-box; }
     body {
@@ -395,13 +462,9 @@ def is_admin_authenticated() -> bool:
     return bool(provided) and pysecrets.compare_digest(provided, ADMIN_TOKEN)
 
 
-# ---------- SMS ----------
+# ---------- Validering ----------
 
 def normalize_msisdn(raw: str) -> str:
-    """
-    Returnerer kun cifre. 8-cifrede numre antages som DK og prefixes med 45.
-    Kaster ValueError ved ugyldigt format.
-    """
     if not raw:
         raise ValueError("Modtagernummer mangler.")
     cleaned = re.sub(r"[\s\-\(\)\.]", "", raw.strip())
@@ -427,18 +490,24 @@ def validate_sender_alias(alias: str) -> str:
     return alias
 
 
+def validate_email_address(email: str) -> str:
+    email = (email or "").strip()
+    if not email:
+        raise ValueError("Modtagermail mangler.")
+    if not re.match(r"^[^\s@]+@[^\s@]+\.[^\s@]+$", email):
+        raise ValueError("Modtagermail har ugyldigt format.")
+    if len(email) > 254:
+        raise ValueError("Modtagermail er for lang.")
+    return email
+
+
+# ---------- SMS ----------
+
 def render_sms_text(template: str, *, name: str, passphrase: str, link: str) -> str:
-    """
-    Renderer SMS-tekst. Hvis name er tom, droppes 'Hej {name}' linjen
-    så beskeden ikke ender med 'Hej ,' eller lignende.
-    """
     text = template or DEFAULT_SMS_TEMPLATE
     name_clean = (name or "").strip()
-
     if not name_clean:
-        # Fjern hele "Hej {name}" linjen (og evt. efterfølgende tomme linje)
         text = re.sub(r"^Hej\s*\{name\}\s*\n+", "", text)
-
     text = text.replace("{name}", name_clean)
     text = text.replace("{passphrase}", passphrase or "")
     text = text.replace("{link}", link or "")
@@ -446,10 +515,6 @@ def render_sms_text(template: str, *, name: str, passphrase: str, link: str) -> 
 
 
 def send_sms(msisdn: str, sender_alias: str, text: str) -> dict:
-    """
-    Sender SMS via smscph.dk. Returnerer dict med status, http_status og evt. message_id/raw.
-    Kaster RuntimeError ved netværks- eller API-fejl.
-    """
     if not SMS_AUTH_TOKEN:
         raise RuntimeError("SMS_AUTH_TOKEN er ikke konfigureret.")
     if not text:
@@ -586,7 +651,7 @@ def reveal_secret_record(token: str, passphrase: str | None):
     return secret_value, None, 200
 
 
-# ---------- Orkestrering: opret secret + send evt. SMS ----------
+# ---------- Orkestrering ----------
 
 def create_and_optionally_sms(
     *,
@@ -636,7 +701,7 @@ def create_and_optionally_sms(
     return token, expires_at, sms_info
 
 
-# ---------- Middleware + routes ----------
+# ---------- Middleware ----------
 
 @app.after_request
 def add_security_headers(response):
@@ -658,6 +723,8 @@ def add_security_headers(response):
     return response
 
 
+# ---------- Routes ----------
+
 @app.route("/healthz", methods=["GET"])
 def healthz():
     with get_conn() as conn:
@@ -674,6 +741,7 @@ def index():
         error=None,
         result=None,
         default_message=DEFAULT_SMS_TEMPLATE,
+        default_subject=DEFAULT_EMAIL_SUBJECT,
     )
 
 
@@ -685,6 +753,7 @@ def create_form():
             error="Ugyldig admin token.",
             result=None,
             default_message=DEFAULT_SMS_TEMPLATE,
+            default_subject=DEFAULT_EMAIL_SUBJECT,
         ), 401
 
     secret_value = request.form.get("secret", "")
@@ -693,8 +762,23 @@ def create_form():
     recipient_msisdn = request.form.get("recipient_msisdn", "") or None
     recipient_name = request.form.get("recipient_name", "") or None
     sender_alias = request.form.get("sender_alias", "") or None
-    # Beskedteksten bygges altid fra DEFAULT_SMS_TEMPLATE via UI'et
+    recipient_email_raw = request.form.get("recipient_email", "").strip()
+    email_subject_raw = request.form.get("email_subject", "").strip()
     message_text = None
+
+    # Valider mail-format hvis det er udfyldt
+    validated_email = None
+    if recipient_email_raw:
+        try:
+            validated_email = validate_email_address(recipient_email_raw)
+        except ValueError as exc:
+            return render_template_string(
+                CREATE_TEMPLATE,
+                error=str(exc),
+                result=None,
+                default_message=DEFAULT_SMS_TEMPLATE,
+                default_subject=DEFAULT_EMAIL_SUBJECT,
+            ), 400
 
     try:
         token, expires_at, sms_info = create_and_optionally_sms(
@@ -712,15 +796,23 @@ def create_form():
             mid = sms_info.get("message_id")
             sms_status = f"sendt (HTTP {sms_info.get('http_status')}{', id ' + str(mid) if mid else ''})"
 
+        result = {
+            "url": one_time_url,
+            "expires_at": iso_z(expires_at),
+            "sms_status": sms_status,
+            "sms_was_sent": bool(sms_info),
+        }
+        if validated_email:
+            result["email_to"] = validated_email
+            result["email_subject"] = email_subject_raw or DEFAULT_EMAIL_SUBJECT
+            result["email_recipient_name"] = (recipient_name or "").strip()
+
         return render_template_string(
             CREATE_TEMPLATE,
             error=None,
-            result={
-                "url": one_time_url,
-                "expires_at": iso_z(expires_at),
-                "sms_status": sms_status,
-            },
+            result=result,
             default_message=DEFAULT_SMS_TEMPLATE,
+            default_subject=DEFAULT_EMAIL_SUBJECT,
         )
     except ValueError as exc:
         return render_template_string(
@@ -728,6 +820,7 @@ def create_form():
             error=str(exc),
             result=None,
             default_message=DEFAULT_SMS_TEMPLATE,
+            default_subject=DEFAULT_EMAIL_SUBJECT,
         ), 400
     except RuntimeError as exc:
         return render_template_string(
@@ -735,6 +828,7 @@ def create_form():
             error=f"SMS-afsendelse fejlede. Secret blev ikke oprettet. Detalje: {exc}",
             result=None,
             default_message=DEFAULT_SMS_TEMPLATE,
+            default_subject=DEFAULT_EMAIL_SUBJECT,
         ), 502
 
 
