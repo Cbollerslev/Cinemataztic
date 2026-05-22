@@ -34,6 +34,7 @@ APP_BASE_URL = os.getenv("APP_BASE_URL", "").strip().rstrip("/")
 MAX_SECRET_LENGTH = int(os.getenv("MAX_SECRET_LENGTH", "10000"))
 MAX_TTL_MINUTES = int(os.getenv("MAX_TTL_MINUTES", "10080"))
 SESSION_HOURS = int(os.getenv("SESSION_HOURS", "8"))
+INVITE_HOURS = int(os.getenv("INVITE_HOURS", "48"))
 
 # --- Bootstrap-bruger (oprettes ved opstart hvis sat) ---
 BOOTSTRAP_ADMIN_EMAIL = os.getenv("BOOTSTRAP_ADMIN_EMAIL", "").strip().lower()
@@ -170,7 +171,7 @@ CREATE_TEMPLATE = """
 </head>
 <body>
   <div class="topbar">
-    <span>Logget ind som <strong>{{ current_user }}</strong></span>
+    <span>Logget ind som <strong>{{ current_user }}</strong> &middot; <a href="/users">Brugere</a></span>
     <a href="/logout">Log ud</a>
   </div>
 
@@ -313,6 +314,271 @@ CREATE_TEMPLATE = """
 
       window.location.href = href;
     }
+  </script>
+</body>
+</html>
+"""
+
+USERS_TEMPLATE = """
+<!doctype html>
+<html lang="da">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Brugere</title>
+  <style>
+    body { font-family: Arial, sans-serif; background:#0f172a; color:#e2e8f0; margin:0; padding:40px; }
+    .card { max-width: 920px; margin: 0 auto; background:#111827; border:1px solid #334155; border-radius:12px; padding:24px; }
+    .topbar { display:flex; justify-content:space-between; align-items:center; max-width:920px;
+              margin: 0 auto 12px auto; color:#94a3b8; font-size:14px; }
+    .topbar a { color:#60a5fa; text-decoration:none; }
+    .topbar a:hover { text-decoration:underline; }
+    h1 { margin-top:0; }
+    h2 { margin-top:28px; font-size:18px; color:#cbd5e1; border-bottom:1px solid #334155; padding-bottom:6px; }
+    label { display:block; margin:16px 0 6px; font-weight:600; }
+    input, button { width:100%; box-sizing:border-box; border-radius:8px; border:1px solid #475569; background:#0b1220; color:#e2e8f0; padding:12px; }
+    button { background:#2563eb; border:none; cursor:pointer; font-weight:700; margin-top:20px; }
+    button:hover { background:#1d4ed8; }
+    button.secondary { background:#0ea5e9; }
+    button.secondary:hover { background:#0284c7; }
+    .btn-row { display:flex; gap:10px; margin-top:14px; }
+    .btn-row button { margin-top:0; }
+    .msg { margin:16px 0; padding:12px 14px; border-radius:8px; }
+    .ok { background:#052e16; border:1px solid #166534; }
+    .err { background:#450a0a; border:1px solid #991b1b; }
+    code, pre { background:#020617; padding:3px 6px; border-radius:6px; }
+    pre { white-space:pre-wrap; word-break:break-word; padding:16px; }
+    table { width:100%; border-collapse:collapse; margin-top:12px; }
+    th, td { text-align:left; padding:10px; border-bottom:1px solid #334155; font-size:14px; }
+    th { color:#94a3b8; font-weight:600; }
+    .small { color:#94a3b8; font-size:13px; }
+  </style>
+</head>
+<body>
+  <div class="topbar">
+    <span>Logget ind som <strong>{{ current_user }}</strong> &middot; <a href="/">Opret link</a></span>
+    <a href="/logout">Log ud</a>
+  </div>
+
+  <div class="card">
+    <h1>Brugere</h1>
+
+    {% if error %}
+      <div class="msg err">{{ error }}</div>
+    {% endif %}
+
+    {% if invite_result %}
+      <div class="msg ok">
+        <div><strong>Invitation oprettet til {{ invite_result.email }}</strong></div>
+        <div>Udløber: {{ invite_result.expires_at }}</div>
+        <pre id="inviteLink">{{ invite_result.url }}</pre>
+        <div class="btn-row">
+          <button type="button" onclick="copyInvite()">Kopiér link</button>
+          <button type="button" class="secondary" onclick="openMail()">Åbn mail i Outlook</button>
+        </div>
+      </div>
+      <script>
+        window.__invite = {
+          to: {{ invite_result.email|tojson }},
+          link: {{ invite_result.url|tojson }},
+          hours: {{ invite_hours|tojson }}
+        };
+      </script>
+    {% endif %}
+
+    <h2>Inviter ny bruger</h2>
+    <form method="post" action="/users/invite" autocomplete="off">
+      <label>Email</label>
+      <input type="email" name="email" required placeholder="fx anne@unicef.dk">
+      <button type="submit">Opret invitation</button>
+    </form>
+
+    <h2>Eksisterende brugere</h2>
+    {% if users %}
+      <table>
+        <thead><tr><th>Email</th><th>Oprettet</th><th>Sidste login</th></tr></thead>
+        <tbody>
+          {% for u in users %}
+            <tr>
+              <td>{{ u.email }}</td>
+              <td class="small">{{ u.created_at }}</td>
+              <td class="small">{{ u.last_login_at or 'aldrig' }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    {% else %}
+      <p class="small">Ingen brugere.</p>
+    {% endif %}
+
+    <h2>Afventende invitationer</h2>
+    {% if invites %}
+      <table>
+        <thead><tr><th>Email</th><th>Oprettet</th><th>Udløber</th><th>Af</th></tr></thead>
+        <tbody>
+          {% for i in invites %}
+            <tr>
+              <td>{{ i.email }}</td>
+              <td class="small">{{ i.created_at }}</td>
+              <td class="small">{{ i.expires_at }}</td>
+              <td class="small">{{ i.created_by }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    {% else %}
+      <p class="small">Ingen afventende invitationer.</p>
+    {% endif %}
+  </div>
+
+  <script>
+    async function copyInvite() {
+      const value = document.getElementById("inviteLink")?.innerText || "";
+      if (!value) return;
+      await navigator.clipboard.writeText(value);
+      alert("Link kopieret");
+    }
+
+    function openMail() {
+      const i = window.__invite;
+      if (!i) return;
+
+      const subject = "Adgang til UNICEF secret-værktøj";
+      const bodyLines = [
+        "Hej,",
+        "",
+        "Du er blevet inviteret som bruger af UNICEF's interne værktøj til sikre engangslinks.",
+        "",
+        "Brug linket nedenfor til at vælge dit kodeord. Linket udløber om " + i.hours + " timer og kan kun bruges én gang.",
+        "",
+        "Link:",
+        i.link,
+        "",
+        "Venlig hilsen",
+        "UNICEF"
+      ];
+      const body = bodyLines.join("\\n");
+      const href =
+        "mailto:" + encodeURIComponent(i.to) +
+        "?subject=" + encodeURIComponent(subject) +
+        "&body=" + encodeURIComponent(body);
+      window.location.href = href;
+    }
+  </script>
+</body>
+</html>
+"""
+
+INVITE_TEMPLATE = """
+<!doctype html>
+<html lang="da">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Vælg kodeord</title>
+  <style>
+    body { font-family: Arial, sans-serif; background:#0f172a; color:#e2e8f0; margin:0;
+           min-height:100vh; display:flex; align-items:center; justify-content:center; padding:20px; }
+    .card { max-width:460px; width:100%; background:#111827; border:1px solid #334155;
+            border-radius:12px; padding:32px; }
+    h1 { margin-top:0; }
+    label { display:block; margin:16px 0 6px; font-weight:600; }
+    input, button { width:100%; box-sizing:border-box; border-radius:8px; border:1px solid #475569;
+                    background:#0b1220; color:#e2e8f0; padding:12px; font-size:15px; }
+    button { background:#2563eb; border:none; cursor:pointer; font-weight:700; margin-top:20px; }
+    button:hover { background:#1d4ed8; }
+    .msg { margin:16px 0 0 0; padding:12px 14px; border-radius:8px; }
+    .err { background:#450a0a; border:1px solid #991b1b; }
+    .ok  { background:#052e16; border:1px solid #166534; }
+    .small { color:#94a3b8; font-size:13px; margin-top:8px; }
+    input[readonly] { background:#020617; color:#94a3b8; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Vælg kodeord</h1>
+    <p class="small">Færdiggør oprettelsen af din bruger ved at vælge et kodeord (mindst 8 tegn).</p>
+
+    <div id="errorBox" class="msg err" hidden></div>
+    <div id="okBox" class="msg ok" hidden></div>
+
+    <form id="setForm" autocomplete="off">
+      <label>Email</label>
+      <input type="email" id="email" readonly>
+      <label>Nyt kodeord</label>
+      <input type="password" id="password" minlength="8" required autofocus>
+      <label>Bekræft kodeord</label>
+      <input type="password" id="password2" minlength="8" required>
+      <button type="submit">Gem og log ind</button>
+    </form>
+  </div>
+
+  <script>
+    const errorBox = document.getElementById("errorBox");
+    const okBox = document.getElementById("okBox");
+    const setForm = document.getElementById("setForm");
+    const emailField = document.getElementById("email");
+
+    function showError(msg) {
+      okBox.hidden = true;
+      errorBox.hidden = false;
+      errorBox.textContent = msg;
+    }
+    function showOk(msg) {
+      errorBox.hidden = true;
+      okBox.hidden = false;
+      okBox.textContent = msg;
+    }
+
+    const token = window.location.hash ? window.location.hash.substring(1) : "";
+    if (!token) {
+      setForm.hidden = true;
+      showError("Linket er ikke komplet. Kontrollér, at du har åbnet hele linket, præcis som det blev sendt til dig.");
+    } else {
+      // Hent email tilhørende token
+      fetch("/api/invites/lookup", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token: token })
+      }).then(r => r.json().then(d => ({ ok: r.ok, data: d })))
+        .then(({ ok, data }) => {
+          if (!ok) {
+            setForm.hidden = true;
+            showError(data.error || "Invite-linket er ugyldigt eller udløbet.");
+            return;
+          }
+          emailField.value = data.email;
+        }).catch(() => {
+          setForm.hidden = true;
+          showError("Kunne ikke validere linket. Prøv igen om et øjeblik.");
+        });
+    }
+
+    setForm.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const password = document.getElementById("password").value;
+      const password2 = document.getElementById("password2").value;
+      if (password !== password2) {
+        showError("Kodeordene matcher ikke.");
+        return;
+      }
+      try {
+        const response = await fetch("/api/invites/consume", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ token: token, password: password })
+        });
+        const data = await response.json();
+        if (!response.ok) {
+          showError(data.error || "Kunne ikke gemme kodeordet.");
+          return;
+        }
+        showOk("Bruger oprettet. Du sendes til log ind-siden ...");
+        setTimeout(() => { window.location.href = "/login"; }, 1500);
+      } catch (err) {
+        showError("Midlertidig forbindelsesfejl. Prøv igen om et øjeblik.");
+      }
+    });
   </script>
 </body>
 </html>
@@ -503,6 +769,21 @@ def init_db():
                 )
                 """
             )
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS user_invites (
+                    id BIGSERIAL PRIMARY KEY,
+                    token_hash TEXT NOT NULL UNIQUE,
+                    email TEXT NOT NULL,
+                    expires_at BIGINT NOT NULL,
+                    created_at BIGINT NOT NULL,
+                    created_by TEXT NOT NULL
+                )
+                """
+            )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_invites_expires_at ON user_invites (expires_at)"
+            )
 
 
 def now_epoch():
@@ -583,6 +864,159 @@ def update_last_login(user_id: int) -> None:
                 "UPDATE users SET last_login_at = %s WHERE id = %s",
                 (now_epoch(), user_id),
             )
+
+
+# ---------- Invite-funktioner ----------
+
+def cleanup_expired_invites(cur):
+    cur.execute("DELETE FROM user_invites WHERE expires_at <= %s", (now_epoch(),))
+
+
+def create_invite(email: str, created_by: str) -> tuple[str, int]:
+    """
+    Opretter et invite-token til den givne email.
+    Fejler hvis bruger allerede findes.
+    Returnerer (token, expires_at_epoch).
+    """
+    email = normalize_email(email)
+    if not email or not re.match(r"^[^\s@]+@[^\s@]+\.[^\s@]+$", email):
+        raise ValueError("Ugyldig email.")
+    if len(email) > 254:
+        raise ValueError("Email er for lang.")
+
+    existing = get_user_by_email(email)
+    if existing:
+        raise ValueError(f"Bruger {email} findes allerede.")
+
+    token = pysecrets.token_urlsafe(32)
+    token_hash = sha256_text(token)
+    created_at = now_epoch()
+    expires_at = created_at + (INVITE_HOURS * 3600)
+
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cleanup_expired_invites(cur)
+            cur.execute(
+                """
+                INSERT INTO user_invites (token_hash, email, expires_at, created_at, created_by)
+                VALUES (%s, %s, %s, %s, %s)
+                """,
+                (token_hash, email, expires_at, created_at, created_by),
+            )
+
+    log.info("Invite oprettet email=%s created_by=%s", email, created_by)
+    return token, expires_at
+
+
+def lookup_invite_email(token: str) -> str | None:
+    """Returnerer email hvis token er gyldigt og ikke udløbet, ellers None."""
+    if not isinstance(token, str) or not token or len(token) > 500:
+        return None
+    token_hash = sha256_text(token)
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cleanup_expired_invites(cur)
+            cur.execute(
+                """
+                SELECT email FROM user_invites
+                WHERE token_hash = %s AND expires_at > %s
+                """,
+                (token_hash, now_epoch()),
+            )
+            row = cur.fetchone()
+            return row[0] if row else None
+
+
+def consume_invite(token: str, password: str) -> tuple[str | None, str | None, int]:
+    """
+    Forbruger et invite-token og opretter brugeren med det valgte kodeord.
+    Returnerer (email_eller_None, fejl_eller_None, http_status).
+    """
+    if not isinstance(token, str) or not token or len(token) > 500:
+        return None, "Ugyldigt invite-link.", 400
+    if not password or len(password) < 8:
+        return None, "Adgangskode skal være mindst 8 tegn.", 400
+    if len(password) > 1024:
+        return None, "Adgangskode er for lang.", 400
+
+    token_hash = sha256_text(token)
+    password_hash = generate_password_hash(password)
+    now = now_epoch()
+
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cleanup_expired_invites(cur)
+            cur.execute(
+                """
+                SELECT id, email FROM user_invites
+                WHERE token_hash = %s AND expires_at > %s
+                FOR UPDATE
+                """,
+                (token_hash, now_epoch()),
+            )
+            row = cur.fetchone()
+            if row is None:
+                return None, "Invite-linket er ugyldigt, udløbet eller allerede brugt.", 404
+
+            invite_id, email = row
+
+            # Tjek igen om brugeren er blevet oprettet i mellemtiden
+            cur.execute("SELECT id FROM users WHERE email = %s", (email,))
+            if cur.fetchone():
+                cur.execute("DELETE FROM user_invites WHERE id = %s", (invite_id,))
+                return None, "Bruger findes allerede. Brug log ind-siden.", 409
+
+            cur.execute(
+                """
+                INSERT INTO users (email, password_hash, created_at)
+                VALUES (%s, %s, %s)
+                """,
+                (email, password_hash, now),
+            )
+            cur.execute("DELETE FROM user_invites WHERE id = %s", (invite_id,))
+
+    log.info("Bruger oprettet via invite email=%s", email)
+    return email, None, 200
+
+
+def list_users() -> list[dict]:
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT email, created_at, last_login_at FROM users ORDER BY created_at DESC"
+            )
+            rows = cur.fetchall()
+    return [
+        {
+            "email": email,
+            "created_at": iso_z(created),
+            "last_login_at": iso_z(last) if last else None,
+        }
+        for (email, created, last) in rows
+    ]
+
+
+def list_pending_invites() -> list[dict]:
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cleanup_expired_invites(cur)
+            cur.execute(
+                """
+                SELECT email, created_at, expires_at, created_by
+                FROM user_invites
+                ORDER BY created_at DESC
+                """
+            )
+            rows = cur.fetchall()
+    return [
+        {
+            "email": email,
+            "created_at": iso_z(created),
+            "expires_at": iso_z(expires),
+            "created_by": created_by,
+        }
+        for (email, created, expires, created_by) in rows
+    ]
 
 
 def bootstrap_user_if_configured():
@@ -997,6 +1431,81 @@ def login():
 def logout():
     session.clear()
     return redirect(url_for("login"))
+
+
+# ---------- Bruger-administration (web) ----------
+
+@app.route("/users", methods=["GET"])
+@login_required_web
+def users_page():
+    return render_template_string(
+        USERS_TEMPLATE,
+        error=None,
+        invite_result=None,
+        users=list_users(),
+        invites=list_pending_invites(),
+        invite_hours=INVITE_HOURS,
+        current_user=current_user_label(),
+    )
+
+
+@app.route("/users/invite", methods=["POST"])
+@login_required_web
+def users_invite():
+    email = (request.form.get("email") or "").strip()
+    try:
+        token, expires_at = create_invite(email, current_user_label())
+        invite_url = f"{get_base_url()}/invite#{token}"
+        return render_template_string(
+            USERS_TEMPLATE,
+            error=None,
+            invite_result={
+                "email": normalize_email(email),
+                "url": invite_url,
+                "expires_at": iso_z(expires_at),
+            },
+            users=list_users(),
+            invites=list_pending_invites(),
+            invite_hours=INVITE_HOURS,
+            current_user=current_user_label(),
+        )
+    except ValueError as exc:
+        return render_template_string(
+            USERS_TEMPLATE,
+            error=str(exc),
+            invite_result=None,
+            users=list_users(),
+            invites=list_pending_invites(),
+            invite_hours=INVITE_HOURS,
+            current_user=current_user_label(),
+        ), 400
+
+
+@app.route("/invite", methods=["GET"])
+def invite_page():
+    """Selve siden hvor brugeren vælger kodeord. Token kommer som fragment."""
+    return render_template_string(INVITE_TEMPLATE)
+
+
+@app.route("/api/invites/lookup", methods=["POST"])
+def invite_lookup_api():
+    data = request.get_json(silent=True) or {}
+    token = data.get("token", "")
+    email = lookup_invite_email(token)
+    if not email:
+        return jsonify({"error": "Invite-linket er ugyldigt, udløbet eller allerede brugt."}), 404
+    return jsonify({"email": email}), 200
+
+
+@app.route("/api/invites/consume", methods=["POST"])
+def invite_consume_api():
+    data = request.get_json(silent=True) or {}
+    token = data.get("token", "")
+    password = data.get("password", "")
+    email, error, status_code = consume_invite(token, password)
+    if error:
+        return jsonify({"error": error}), status_code
+    return jsonify({"email": email}), 200
 
 
 @app.route("/", methods=["GET"])
