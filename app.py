@@ -1,15 +1,23 @@
 import os
+import re
+import json
 import hashlib
+import logging
 import secrets as pysecrets
 from datetime import datetime, timezone
 
 import psycopg
+import requests
 from cryptography.fernet import Fernet
 from flask import Flask, jsonify, render_template_string, request
 from werkzeug.security import check_password_hash, generate_password_hash
 
 app = Flask(__name__)
 
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+log = logging.getLogger("onetime-secret")
+
+# --- Kerne-konfiguration ---
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 MASTER_KEY = os.getenv("MASTER_KEY", "").strip()
 ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "").strip()
@@ -17,16 +25,30 @@ APP_BASE_URL = os.getenv("APP_BASE_URL", "").strip().rstrip("/")
 MAX_SECRET_LENGTH = int(os.getenv("MAX_SECRET_LENGTH", "10000"))
 MAX_TTL_MINUTES = int(os.getenv("MAX_TTL_MINUTES", "10080"))
 
+# --- SMS-konfiguration ---
+SMS_URL = os.getenv("SMS_URL", "https://smsoutbound.api.v1.smscph.dk/SendSms").strip()
+SMS_AUTH_TOKEN = os.getenv("SMS_AUTH_TOKEN", "").strip()
+SMS_CHANNEL = os.getenv("SMS_CHANNEL", "1900").strip()
+SMS_SERVICE_ID = os.getenv("SMS_SERVICE_ID", "single_sms").strip()
+SMS_DEFAULT_SENDER = os.getenv("SMS_DEFAULT_SENDER", "UNICEF").strip()
+SMS_TIMEOUT_SECONDS = int(os.getenv("SMS_TIMEOUT_SECONDS", "15"))
+MAX_SMS_TEXT_LENGTH = int(os.getenv("MAX_SMS_TEXT_LENGTH", "1000"))
+
 if not DATABASE_URL:
     raise RuntimeError("DATABASE_URL is required")
-
 if not MASTER_KEY:
     raise RuntimeError("MASTER_KEY is required")
-
 if not ADMIN_TOKEN:
     raise RuntimeError("ADMIN_TOKEN is required")
 
 fernet = Fernet(MASTER_KEY.encode())
+
+DEFAULT_SMS_TEMPLATE = (
+    "Hej {name},\n\n"
+    "Koden til at åbne det sikre link er: {passphrase}\n\n"
+    "Venlig hilsen\n"
+    "UNICEF"
+)
 
 CREATE_TEMPLATE = """
 <!doctype html>
@@ -39,9 +61,11 @@ CREATE_TEMPLATE = """
     body { font-family: Arial, sans-serif; background:#0f172a; color:#e2e8f0; margin:0; padding:40px; }
     .card { max-width: 920px; margin: 0 auto; background:#111827; border:1px solid #334155; border-radius:12px; padding:24px; }
     h1 { margin-top:0; }
+    h2 { margin-top:28px; font-size:18px; color:#cbd5e1; border-bottom:1px solid #334155; padding-bottom:6px; }
     label { display:block; margin:16px 0 6px; font-weight:600; }
     input, textarea, button { width:100%; box-sizing:border-box; border-radius:8px; border:1px solid #475569; background:#0b1220; color:#e2e8f0; padding:12px; }
-    textarea { min-height:180px; resize:vertical; }
+    textarea { min-height:140px; resize:vertical; font-family: Arial, sans-serif; }
+    textarea.message { min-height:160px; }
     button { background:#2563eb; border:none; cursor:pointer; font-weight:700; margin-top:20px; }
     button:hover { background:#1d4ed8; }
     .msg { margin:16px 0; padding:12px 14px; border-radius:8px; }
@@ -50,6 +74,7 @@ CREATE_TEMPLATE = """
     code, pre { background:#020617; padding:3px 6px; border-radius:6px; }
     pre { white-space:pre-wrap; word-break:break-word; padding:16px; }
     .small { color:#94a3b8; font-size:14px; }
+    .hint { color:#94a3b8; font-size:13px; margin-top:4px; }
     .row { display:grid; grid-template-columns: 1fr 1fr; gap:16px; }
     @media (max-width: 700px) { .row { grid-template-columns: 1fr; } }
   </style>
@@ -70,6 +95,9 @@ CREATE_TEMPLATE = """
       <div class="msg ok">
         <div><strong>Link oprettet</strong></div>
         <div>Udløber: {{ result.expires_at }}</div>
+        {% if result.sms_status %}
+          <div>SMS: {{ result.sms_status }}</div>
+        {% endif %}
         <pre id="linkBox">{{ result.url }}</pre>
         <button type="button" onclick="copyLink()">Kopiér link</button>
       </div>
@@ -78,6 +106,8 @@ CREATE_TEMPLATE = """
     <form method="post" action="/create" autocomplete="off">
       <label>Admin token</label>
       <input type="password" name="admin_token" required>
+
+      <h2>Secret</h2>
 
       <label>Secret</label>
       <textarea name="secret" required></textarea>
@@ -88,10 +118,35 @@ CREATE_TEMPLATE = """
           <input type="number" name="ttl_minutes" min="1" max="10080" value="1440" required>
         </div>
         <div>
-          <label>Passphrase (valgfri)</label>
-          <input type="text" name="passphrase" placeholder="Ekstra kode sendt i separat kanal">
+          <label>Passphrase (valgfri, men anbefalet hvis SMS bruges)</label>
+          <input type="text" name="passphrase" placeholder="Ekstra kode, kan sendes via SMS">
         </div>
       </div>
+
+      <h2>SMS (valgfri)</h2>
+      <p class="small">
+        Udfyldes modtagernummeret, sendes en SMS via smscph.dk. Beskeden kan bruge
+        placeholders: <code>{name}</code>, <code>{passphrase}</code>, <code>{link}</code>.
+      </p>
+
+      <div class="row">
+        <div>
+          <label>Modtagernummer</label>
+          <input type="text" name="recipient_msisdn" placeholder="fx 12345678 eller 4512345678">
+          <div class="hint">8 cifre antages som DK og får automatisk 45-prefix.</div>
+        </div>
+        <div>
+          <label>Modtagernavn</label>
+          <input type="text" name="recipient_name" placeholder="fx Anne Hansen">
+        </div>
+      </div>
+
+      <label>Afsendernavn (senderAlias)</label>
+      <input type="text" name="sender_alias" maxlength="11" value="UNICEF" placeholder="Max 11 tegn">
+
+      <label>Besked</label>
+      <textarea name="message_text" class="message" placeholder="{{ default_message }}"></textarea>
+      <div class="hint">Lades tom hvis SMS ikke skal sendes. Standardtekst bruges, hvis modtagernummer er udfyldt men besked er tom.</div>
 
       <button type="submit">Opret engangslink</button>
     </form>
@@ -133,227 +188,46 @@ REVEAL_TEMPLATE = """
       --input: rgba(15, 23, 42, 0.75);
       --shadow: 0 20px 60px rgba(0,0,0,0.35);
     }
-
     * { box-sizing: border-box; }
-
     body {
-      margin: 0;
-      font-family: Inter, Arial, sans-serif;
-      color: var(--text);
+      margin: 0; font-family: Inter, Arial, sans-serif; color: var(--text);
       background:
         radial-gradient(circle at top left, rgba(79,140,255,0.20), transparent 30%),
         radial-gradient(circle at top right, rgba(59,130,246,0.16), transparent 25%),
         linear-gradient(180deg, var(--bg) 0%, var(--bg2) 100%);
-      min-height: 100vh;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      padding: 32px 20px;
+      min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 32px 20px;
     }
-
-    .wrap {
-      width: 100%;
-      max-width: 760px;
-    }
-
-    .card {
-      background: var(--card);
-      border: 1px solid var(--border);
-      border-radius: 20px;
-      box-shadow: var(--shadow);
-      overflow: hidden;
-      backdrop-filter: blur(10px);
-    }
-
-    .hero {
-      padding: 28px 28px 18px 28px;
-      border-bottom: 1px solid rgba(148, 163, 184, 0.10);
-      background: linear-gradient(180deg, rgba(79,140,255,0.10) 0%, rgba(79,140,255,0.03) 100%);
-    }
-
-    .badge {
-      display: inline-flex;
-      align-items: center;
-      gap: 8px;
-      font-size: 12px;
-      letter-spacing: 0.04em;
-      text-transform: uppercase;
-      color: #c7d7ff;
-      background: rgba(79,140,255,0.12);
-      border: 1px solid rgba(79,140,255,0.22);
-      padding: 8px 12px;
-      border-radius: 999px;
-      margin-bottom: 16px;
-    }
-
-    h1 {
-      margin: 0 0 12px 0;
-      font-size: 30px;
-      line-height: 1.15;
-      font-weight: 700;
-    }
-
-    .lead {
-      margin: 0;
-      color: var(--muted);
-      font-size: 16px;
-      line-height: 1.6;
-      max-width: 620px;
-    }
-
-    .body {
-      padding: 28px;
-    }
-
-    .panel {
-      background: rgba(2, 6, 23, 0.38);
-      border: 1px solid rgba(148, 163, 184, 0.10);
-      border-radius: 16px;
-      padding: 22px;
-      margin-bottom: 18px;
-    }
-
-    .panel h2 {
-      margin: 0 0 8px 0;
-      font-size: 18px;
-    }
-
-    .panel p {
-      margin: 0;
-      color: var(--muted);
-      line-height: 1.6;
-      font-size: 15px;
-    }
-
-    input {
-      width: 100%;
-      padding: 14px 14px;
-      border-radius: 12px;
-      border: 1px solid rgba(148, 163, 184, 0.18);
-      background: var(--input);
-      color: var(--text);
-      outline: none;
-      font-size: 15px;
-    }
-
-    input:focus {
-      border-color: rgba(79,140,255,0.55);
-      box-shadow: 0 0 0 4px rgba(79,140,255,0.12);
-    }
-
-    button {
-      width: 100%;
-      margin-top: 18px;
-      border: 0;
-      border-radius: 12px;
-      background: var(--primary);
-      color: white;
-      font-weight: 700;
-      font-size: 15px;
-      padding: 14px 16px;
-      cursor: pointer;
-      transition: background 0.15s ease, transform 0.05s ease;
-    }
-
+    .wrap { width: 100%; max-width: 760px; }
+    .card { background: var(--card); border: 1px solid var(--border); border-radius: 20px; box-shadow: var(--shadow); overflow: hidden; backdrop-filter: blur(10px); }
+    .hero { padding: 28px 28px 18px 28px; border-bottom: 1px solid rgba(148, 163, 184, 0.10); background: linear-gradient(180deg, rgba(79,140,255,0.10) 0%, rgba(79,140,255,0.03) 100%); }
+    .badge { display: inline-flex; align-items: center; gap: 8px; font-size: 12px; letter-spacing: 0.04em; text-transform: uppercase; color: #c7d7ff; background: rgba(79,140,255,0.12); border: 1px solid rgba(79,140,255,0.22); padding: 8px 12px; border-radius: 999px; margin-bottom: 16px; }
+    h1 { margin: 0 0 12px 0; font-size: 30px; line-height: 1.15; font-weight: 700; }
+    .lead { margin: 0; color: var(--muted); font-size: 16px; line-height: 1.6; max-width: 620px; }
+    .body { padding: 28px; }
+    .panel { background: rgba(2, 6, 23, 0.38); border: 1px solid rgba(148, 163, 184, 0.10); border-radius: 16px; padding: 22px; margin-bottom: 18px; }
+    .panel h2 { margin: 0 0 8px 0; font-size: 18px; }
+    .panel p { margin: 0; color: var(--muted); line-height: 1.6; font-size: 15px; }
+    input { width: 100%; padding: 14px 14px; border-radius: 12px; border: 1px solid rgba(148, 163, 184, 0.18); background: var(--input); color: var(--text); outline: none; font-size: 15px; }
+    input:focus { border-color: rgba(79,140,255,0.55); box-shadow: 0 0 0 4px rgba(79,140,255,0.12); }
+    button { width: 100%; margin-top: 18px; border: 0; border-radius: 12px; background: var(--primary); color: white; font-weight: 700; font-size: 15px; padding: 14px 16px; cursor: pointer; transition: background 0.15s ease, transform 0.05s ease; }
     button:hover { background: var(--primary-hover); }
     button:active { transform: translateY(1px); }
-
-    .msg {
-      margin-bottom: 18px;
-      padding: 16px 18px;
-      border-radius: 14px;
-      line-height: 1.55;
-      font-size: 15px;
-    }
-
-    .ok {
-      background: var(--success-bg);
-      border: 1px solid var(--success-border);
-    }
-
-    .err {
-      background: var(--error-bg);
-      border: 1px solid var(--error-border);
-    }
-
-    .msg strong {
-      display: block;
-      margin-bottom: 4px;
-    }
-
-    .secret-box {
-      position: relative;
-      margin-top: 14px;
-      background: rgba(2, 6, 23, 0.72);
-      border: 1px solid rgba(148, 163, 184, 0.10);
-      border-radius: 12px;
-      overflow: hidden;
-    }
-
-    .copy-chip {
-      position: absolute;
-      top: 12px;
-      right: 12px;
-      width: auto;
-      margin: 0;
-      padding: 8px 12px;
-      border-radius: 10px;
-      background: rgba(79,140,255,0.18);
-      border: 1px solid rgba(79,140,255,0.30);
-      color: #eaf2ff;
-      font-size: 13px;
-      font-weight: 700;
-      line-height: 1;
-      z-index: 2;
-    }
-
-    .copy-chip:hover {
-      background: rgba(79,140,255,0.28);
-    }
-
-    pre {
-      margin: 0;
-      white-space: pre-wrap;
-      word-break: break-word;
-      padding: 52px 16px 16px 16px;
-      color: #f8fbff;
-      font-size: 14px;
-      overflow: auto;
-      background: transparent;
-      border: 0;
-    }
-
-    .copy-status {
-      margin-top: 10px;
-      color: #bbf7d0;
-      font-size: 13px;
-      display: none;
-    }
-
-    .note {
-      margin-top: 12px;
-      color: var(--muted);
-      font-size: 13px;
-      line-height: 1.6;
-    }
-
-    .footer {
-      padding: 0 28px 24px 28px;
-      color: var(--muted);
-      font-size: 13px;
-      line-height: 1.6;
-    }
-
+    .msg { margin-bottom: 18px; padding: 16px 18px; border-radius: 14px; line-height: 1.55; font-size: 15px; }
+    .ok { background: var(--success-bg); border: 1px solid var(--success-border); }
+    .err { background: var(--error-bg); border: 1px solid var(--error-border); }
+    .msg strong { display: block; margin-bottom: 4px; }
+    .secret-box { position: relative; margin-top: 14px; background: rgba(2, 6, 23, 0.72); border: 1px solid rgba(148, 163, 184, 0.10); border-radius: 12px; overflow: hidden; }
+    .copy-chip { position: absolute; top: 12px; right: 12px; width: auto; margin: 0; padding: 8px 12px; border-radius: 10px; background: rgba(79,140,255,0.18); border: 1px solid rgba(79,140,255,0.30); color: #eaf2ff; font-size: 13px; font-weight: 700; line-height: 1; z-index: 2; }
+    .copy-chip:hover { background: rgba(79,140,255,0.28); }
+    pre { margin: 0; white-space: pre-wrap; word-break: break-word; padding: 52px 16px 16px 16px; color: #f8fbff; font-size: 14px; overflow: auto; background: transparent; border: 0; }
+    .copy-status { margin-top: 10px; color: #bbf7d0; font-size: 13px; display: none; }
+    .note { margin-top: 12px; color: var(--muted); font-size: 13px; line-height: 1.6; }
+    .footer { padding: 0 28px 24px 28px; color: var(--muted); font-size: 13px; line-height: 1.6; }
     @media (max-width: 640px) {
       h1 { font-size: 24px; }
       .hero, .body, .footer { padding-left: 20px; padding-right: 20px; }
-      .copy-chip {
-        top: 10px;
-        right: 10px;
-      }
-      pre {
-        padding-top: 50px;
-      }
+      .copy-chip { top: 10px; right: 10px; }
+      pre { padding-top: 50px; }
     }
   </style>
 </head>
@@ -363,49 +237,32 @@ REVEAL_TEMPLATE = """
       <div class="hero">
         <div class="badge">Sikker engangsadgang</div>
         <h1>Sikker adgang til delt nøgle</h1>
-        <p class="lead">
-          Denne nøgle er delt sikkert og kan kun vises én gang.
-        </p>
+        <p class="lead">Denne nøgle er delt sikkert og kan kun vises én gang.</p>
       </div>
-
       <div class="body">
         <div id="errorBox" class="msg err" hidden></div>
-
         <div class="panel">
           <h2>Før du fortsætter</h2>
-          <p>
-            UNICEF har sendt en kode, som skal indtastes nedenfor for at få adgang til nøglen.
-          </p>
+          <p>UNICEF har sendt en kode, som skal indtastes nedenfor for at få adgang til nøglen.</p>
         </div>
-
         <form id="revealForm" autocomplete="off">
           <input type="text" id="passphrase" placeholder="Indtast koden fra UNICEF" required>
           <button type="submit">Vis nøgle sikkert</button>
         </form>
-
         <div id="resultBox" class="msg ok" hidden>
           <strong>Nøglen er nu vist</strong>
           <div>Indholdet nedenfor er nu forbrugt og kan ikke hentes igen via samme link.</div>
-
           <div class="secret-box">
             <button type="button" class="copy-chip" onclick="copySecret()">Kopiér</button>
             <pre id="secretValue"></pre>
           </div>
-
           <div id="copyStatus" class="copy-status">Nøglen er kopieret til udklipsholderen.</div>
-
-          <div class="note">
-            Gem nøglen sikkert med det samme, hvis du skal bruge den senere.
-          </div>
+          <div class="note">Gem nøglen sikkert med det samme, hvis du skal bruge den senere.</div>
         </div>
       </div>
-
-      <div class="footer">
-        Af sikkerhedsmæssige årsager bliver nøglen ikke vist automatisk og kan kun åbnes én gang.
-      </div>
+      <div class="footer">Af sikkerhedsmæssige årsager bliver nøglen ikke vist automatisk og kan kun åbnes én gang.</div>
     </div>
   </div>
-
   <script>
     const errorBox = document.getElementById("errorBox");
     const revealForm = document.getElementById("revealForm");
@@ -417,11 +274,9 @@ REVEAL_TEMPLATE = """
       errorBox.hidden = false;
       errorBox.innerHTML = "<strong>" + title + "</strong><div>" + message + "</div>";
     }
-
     async function copySecret() {
       const value = secretValue.textContent || "";
       if (!value) return;
-
       try {
         await navigator.clipboard.writeText(value);
         copyStatus.style.display = "block";
@@ -431,54 +286,32 @@ REVEAL_TEMPLATE = """
         copyStatus.textContent = "Kunne ikke kopiere automatisk. Markér og kopiér nøglen manuelt.";
       }
     }
-
     const token = window.location.hash ? window.location.hash.substring(1) : "";
-
     if (!token) {
       revealForm.hidden = true;
-      showError(
-        "Linket er ikke komplet",
-        "Det ser ud til, at linket mangler den sikre adgangsdel. Kontrollér, at du har åbnet hele linket, præcis som det blev sendt til dig."
-      );
+      showError("Linket er ikke komplet", "Det ser ud til, at linket mangler den sikre adgangsdel. Kontrollér, at du har åbnet hele linket, præcis som det blev sendt til dig.");
     }
-
     revealForm.addEventListener("submit", async (e) => {
       e.preventDefault();
-
       const passphrase = document.getElementById("passphrase").value;
-
       try {
         const response = await fetch("/api/reveal", {
           method: "POST",
-          headers: {
-            "Content-Type": "application/json"
-          },
-          body: JSON.stringify({
-            token: token,
-            passphrase: passphrase
-          })
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ token: token, passphrase: passphrase })
         });
-
         const data = await response.json();
-
         if (!response.ok) {
-          showError(
-            "Adgang kunne ikke gennemføres",
-            data.error || "Nøglen kunne ikke hentes. Kontrollér linket og prøv igen."
-          );
+          showError("Adgang kunne ikke gennemføres", data.error || "Nøglen kunne ikke hentes. Kontrollér linket og prøv igen.");
           return;
         }
-
         revealForm.hidden = true;
         errorBox.hidden = true;
         copyStatus.style.display = "none";
         resultBox.hidden = false;
         secretValue.textContent = data.secret;
       } catch (err) {
-        showError(
-          "Midlertidig forbindelsesfejl",
-          "Der opstod en fejl under hentning af nøglen. Prøv igen om et øjeblik."
-        );
+        showError("Midlertidig forbindelsesfejl", "Der opstod en fejl under hentning af nøglen. Prøv igen om et øjeblik.");
       }
     });
   </script>
@@ -566,6 +399,103 @@ def is_admin_authenticated() -> bool:
     return bool(provided) and pysecrets.compare_digest(provided, ADMIN_TOKEN)
 
 
+# ---------- SMS ----------
+
+def normalize_msisdn(raw: str) -> str:
+    """
+    Returnerer kun cifre. 8-cifrede numre antages som DK og prefixes med 45.
+    Kaster ValueError ved ugyldigt format.
+    """
+    if not raw:
+        raise ValueError("Modtagernummer mangler.")
+    cleaned = re.sub(r"[\s\-\(\)\.]", "", raw.strip())
+    if cleaned.startswith("+"):
+        cleaned = cleaned[1:]
+    if not cleaned.isdigit():
+        raise ValueError("Modtagernummer må kun indeholde cifre (evt. med + prefix).")
+    if len(cleaned) == 8:
+        cleaned = "45" + cleaned
+    if len(cleaned) < 9 or len(cleaned) > 15:
+        raise ValueError("Modtagernummer skal være 8 cifre (DK) eller 9-15 cifre med landekode.")
+    return cleaned
+
+
+def validate_sender_alias(alias: str) -> str:
+    alias = (alias or "").strip()
+    if not alias:
+        return SMS_DEFAULT_SENDER
+    if len(alias) > 11:
+        raise ValueError("Afsendernavn må maks være 11 tegn.")
+    if not re.match(r"^[A-Za-z0-9 ]+$", alias):
+        raise ValueError("Afsendernavn må kun indeholde bogstaver, cifre og mellemrum.")
+    return alias
+
+
+def render_sms_text(template: str, *, name: str, passphrase: str, link: str) -> str:
+    text = template or DEFAULT_SMS_TEMPLATE
+    text = text.replace("{name}", name or "")
+    text = text.replace("{passphrase}", passphrase or "")
+    text = text.replace("{link}", link or "")
+    return text.strip()
+
+
+def send_sms(msisdn: str, sender_alias: str, text: str) -> dict:
+    """
+    Sender SMS via smscph.dk. Returnerer dict med status, http_status og evt. message_id/raw.
+    Kaster RuntimeError ved netværks- eller API-fejl.
+    """
+    if not SMS_AUTH_TOKEN:
+        raise RuntimeError("SMS_AUTH_TOKEN er ikke konfigureret.")
+    if not text:
+        raise RuntimeError("SMS-tekst er tom.")
+    if len(text) > MAX_SMS_TEXT_LENGTH:
+        raise RuntimeError(f"SMS-tekst overstiger {MAX_SMS_TEXT_LENGTH} tegn.")
+
+    payload = {
+        "channel": SMS_CHANNEL,
+        "senderAlias": sender_alias,
+        "serviceId": SMS_SERVICE_ID,
+        "msisdn": msisdn,
+        "text": text,
+    }
+    body_str = json.dumps(payload, separators=(",", ":"))
+    md5_hash = hashlib.md5(body_str.encode("utf-8")).hexdigest()
+    headers = {
+        "Content-Type": "application/json",
+        "Content-MD5": md5_hash,
+        "Authorization": SMS_AUTH_TOKEN,
+    }
+
+    try:
+        response = requests.post(SMS_URL, data=body_str, headers=headers, timeout=SMS_TIMEOUT_SECONDS)
+    except requests.RequestException as exc:
+        log.warning("SMS network error to msisdn=%s: %s", msisdn, exc)
+        raise RuntimeError(f"Netværksfejl ved SMS-afsendelse: {exc}") from exc
+
+    raw_text = response.text or ""
+    try:
+        body = response.json()
+    except ValueError:
+        body = {"raw": raw_text}
+
+    if response.status_code >= 400:
+        log.warning("SMS API error msisdn=%s status=%s", msisdn, response.status_code)
+        raise RuntimeError(f"SMS API svarede {response.status_code}: {raw_text[:300]}")
+
+    message_id = None
+    if isinstance(body, dict):
+        message_id = body.get("messageId") or body.get("id") or body.get("reference")
+
+    log.info("SMS sendt msisdn=%s status=%s message_id=%s", msisdn, response.status_code, message_id)
+    return {
+        "ok": True,
+        "http_status": response.status_code,
+        "message_id": message_id,
+    }
+
+
+# ---------- DB-operationer ----------
+
 def create_secret_record(secret_value: str, ttl_minutes, passphrase: str | None):
     if not isinstance(secret_value, str) or secret_value == "":
         raise ValueError("Secret må ikke være tom.")
@@ -595,11 +525,19 @@ def create_secret_record(secret_value: str, ttl_minutes, passphrase: str | None)
                 """
                 INSERT INTO secrets (token_hash, encrypted_secret, passphrase_hash, expires_at, created_at)
                 VALUES (%s, %s, %s, %s, %s)
+                RETURNING id
                 """,
                 (token_hash, encrypted_secret, passphrase_hash, expires_at, created_at),
             )
+            row_id = cur.fetchone()[0]
 
-    return token, expires_at
+    return row_id, token, expires_at
+
+
+def delete_secret_by_id(row_id: int) -> None:
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM secrets WHERE id = %s", (row_id,))
 
 
 def reveal_secret_record(token: str, passphrase: str | None):
@@ -642,6 +580,56 @@ def reveal_secret_record(token: str, passphrase: str | None):
     return secret_value, None, 200
 
 
+# ---------- Orkestrering: opret secret + send evt. SMS ----------
+
+def create_and_optionally_sms(
+    *,
+    secret_value: str,
+    ttl_minutes,
+    passphrase: str | None,
+    recipient_msisdn: str | None,
+    recipient_name: str | None,
+    sender_alias: str | None,
+    message_text: str | None,
+):
+    """
+    Opretter secret. Hvis recipient_msisdn er angivet, sendes SMS.
+    Hvis SMS fejler, slettes secret igen og fejl propageres.
+    Returnerer (token, expires_at, sms_info | None).
+    """
+    sms_enabled = bool((recipient_msisdn or "").strip())
+
+    normalized_msisdn = None
+    validated_sender = None
+    if sms_enabled:
+        normalized_msisdn = normalize_msisdn(recipient_msisdn)
+        validated_sender = validate_sender_alias(sender_alias)
+
+    row_id, token, expires_at = create_secret_record(secret_value, ttl_minutes, passphrase)
+
+    sms_info = None
+    if sms_enabled:
+        one_time_url = f"{get_base_url()}/s#{token}"
+        text = render_sms_text(
+            message_text,
+            name=(recipient_name or "").strip(),
+            passphrase=(passphrase or "").strip(),
+            link=one_time_url,
+        )
+        try:
+            sms_info = send_sms(normalized_msisdn, validated_sender, text)
+        except Exception:
+            try:
+                delete_secret_by_id(row_id)
+            except Exception as cleanup_exc:
+                log.error("Failed to roll back secret %s after SMS error: %s", row_id, cleanup_exc)
+            raise
+
+    return token, expires_at, sms_info
+
+
+# ---------- Middleware + routes ----------
+
 @app.after_request
 def add_security_headers(response):
     response.headers["Cache-Control"] = "no-store, max-age=0"
@@ -673,7 +661,12 @@ def healthz():
 
 @app.route("/", methods=["GET"])
 def index():
-    return render_template_string(CREATE_TEMPLATE, error=None, result=None)
+    return render_template_string(
+        CREATE_TEMPLATE,
+        error=None,
+        result=None,
+        default_message=DEFAULT_SMS_TEMPLATE,
+    )
 
 
 @app.route("/create", methods=["POST"])
@@ -683,29 +676,57 @@ def create_form():
             CREATE_TEMPLATE,
             error="Ugyldig admin token.",
             result=None,
+            default_message=DEFAULT_SMS_TEMPLATE,
         ), 401
 
     secret_value = request.form.get("secret", "")
     ttl_minutes = request.form.get("ttl_minutes", "1440")
     passphrase = request.form.get("passphrase", "") or None
+    recipient_msisdn = request.form.get("recipient_msisdn", "") or None
+    recipient_name = request.form.get("recipient_name", "") or None
+    sender_alias = request.form.get("sender_alias", "") or None
+    message_text = request.form.get("message_text", "") or None
 
     try:
-        token, expires_at = create_secret_record(secret_value, ttl_minutes, passphrase)
+        token, expires_at, sms_info = create_and_optionally_sms(
+            secret_value=secret_value,
+            ttl_minutes=ttl_minutes,
+            passphrase=passphrase,
+            recipient_msisdn=recipient_msisdn,
+            recipient_name=recipient_name,
+            sender_alias=sender_alias,
+            message_text=message_text,
+        )
         one_time_url = f"{get_base_url()}/s#{token}"
+        sms_status = None
+        if sms_info:
+            mid = sms_info.get("message_id")
+            sms_status = f"sendt (HTTP {sms_info.get('http_status')}{', id ' + str(mid) if mid else ''})"
+
         return render_template_string(
             CREATE_TEMPLATE,
             error=None,
             result={
                 "url": one_time_url,
                 "expires_at": iso_z(expires_at),
+                "sms_status": sms_status,
             },
+            default_message=DEFAULT_SMS_TEMPLATE,
         )
     except ValueError as exc:
         return render_template_string(
             CREATE_TEMPLATE,
             error=str(exc),
             result=None,
+            default_message=DEFAULT_SMS_TEMPLATE,
         ), 400
+    except RuntimeError as exc:
+        return render_template_string(
+            CREATE_TEMPLATE,
+            error=f"SMS-afsendelse fejlede. Secret blev ikke oprettet. Detalje: {exc}",
+            result=None,
+            default_message=DEFAULT_SMS_TEMPLATE,
+        ), 502
 
 
 @app.route("/api/secrets", methods=["POST"])
@@ -717,18 +738,37 @@ def create_api():
     secret_value = data.get("secret", "")
     ttl_minutes = data.get("ttl_minutes", 1440)
     passphrase = data.get("passphrase") or None
+    recipient_msisdn = data.get("recipient_msisdn") or None
+    recipient_name = data.get("recipient_name") or None
+    sender_alias = data.get("sender_alias") or None
+    message_text = data.get("message_text") or None
 
     try:
-        token, expires_at = create_secret_record(secret_value, ttl_minutes, passphrase)
+        token, expires_at, sms_info = create_and_optionally_sms(
+            secret_value=secret_value,
+            ttl_minutes=ttl_minutes,
+            passphrase=passphrase,
+            recipient_msisdn=recipient_msisdn,
+            recipient_name=recipient_name,
+            sender_alias=sender_alias,
+            message_text=message_text,
+        )
         one_time_url = f"{get_base_url()}/s#{token}"
-        return jsonify(
-            {
-                "one_time_url": one_time_url,
-                "expires_at": iso_z(expires_at),
+        response_body = {
+            "one_time_url": one_time_url,
+            "expires_at": iso_z(expires_at),
+        }
+        if sms_info:
+            response_body["sms"] = {
+                "delivered_to_gateway": True,
+                "http_status": sms_info.get("http_status"),
+                "message_id": sms_info.get("message_id"),
             }
-        ), 201
+        return jsonify(response_body), 201
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
+    except RuntimeError as exc:
+        return jsonify({"error": f"SMS failed, secret not created: {exc}"}), 502
 
 
 @app.route("/s", methods=["GET"])
