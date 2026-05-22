@@ -44,8 +44,8 @@ if not ADMIN_TOKEN:
 fernet = Fernet(MASTER_KEY.encode())
 
 DEFAULT_SMS_TEMPLATE = (
-    "Hej {name},\n\n"
-    "Koden til at åbne det sikre link er: {passphrase}\n\n"
+    "Hej {name}\n\n"
+    "Her er din kode: {passphrase}\n\n"
     "Venlig hilsen\n"
     "UNICEF"
 )
@@ -125,8 +125,8 @@ CREATE_TEMPLATE = """
 
       <h2>SMS (valgfri)</h2>
       <p class="small">
-        Udfyldes modtagernummeret, sendes en SMS via smscph.dk. Beskeden kan bruge
-        placeholders: <code>{name}</code>, <code>{passphrase}</code>, <code>{link}</code>.
+        Udfyldes modtagernummeret, sendes der automatisk en SMS via smscph.dk med passphrasen.
+        Beskeden formateres serverside efter fast skabelon.
       </p>
 
       <div class="row">
@@ -143,10 +143,6 @@ CREATE_TEMPLATE = """
 
       <label>Afsendernavn (senderAlias)</label>
       <input type="text" name="sender_alias" maxlength="11" value="UNICEF" placeholder="Max 11 tegn">
-
-      <label>Besked</label>
-      <textarea name="message_text" class="message" placeholder="{{ default_message }}"></textarea>
-      <div class="hint">Lades tom hvis SMS ikke skal sendes. Standardtekst bruges, hvis modtagernummer er udfyldt men besked er tom.</div>
 
       <button type="submit">Opret engangslink</button>
     </form>
@@ -432,8 +428,18 @@ def validate_sender_alias(alias: str) -> str:
 
 
 def render_sms_text(template: str, *, name: str, passphrase: str, link: str) -> str:
+    """
+    Renderer SMS-tekst. Hvis name er tom, droppes 'Hej {name}' linjen
+    så beskeden ikke ender med 'Hej ,' eller lignende.
+    """
     text = template or DEFAULT_SMS_TEMPLATE
-    text = text.replace("{name}", name or "")
+    name_clean = (name or "").strip()
+
+    if not name_clean:
+        # Fjern hele "Hej {name}" linjen (og evt. efterfølgende tomme linje)
+        text = re.sub(r"^Hej\s*\{name\}\s*\n+", "", text)
+
+    text = text.replace("{name}", name_clean)
     text = text.replace("{passphrase}", passphrase or "")
     text = text.replace("{link}", link or "")
     return text.strip()
@@ -602,6 +608,8 @@ def create_and_optionally_sms(
     normalized_msisdn = None
     validated_sender = None
     if sms_enabled:
+        if not (passphrase or "").strip():
+            raise ValueError("Passphrase er påkrævet, når SMS skal sendes (koden indgår i beskeden).")
         normalized_msisdn = normalize_msisdn(recipient_msisdn)
         validated_sender = validate_sender_alias(sender_alias)
 
@@ -685,7 +693,8 @@ def create_form():
     recipient_msisdn = request.form.get("recipient_msisdn", "") or None
     recipient_name = request.form.get("recipient_name", "") or None
     sender_alias = request.form.get("sender_alias", "") or None
-    message_text = request.form.get("message_text", "") or None
+    # Beskedteksten bygges altid fra DEFAULT_SMS_TEMPLATE via UI'et
+    message_text = None
 
     try:
         token, expires_at, sms_info = create_and_optionally_sms(
